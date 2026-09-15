@@ -1,0 +1,17 @@
+# Editor state files
+.nvim-session.vim
+
+# LaTeX generated files
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.gz
+*.toc
+
+# Build
+build/
+
+# Docs (untracked; local prep/notes only)
+docs/

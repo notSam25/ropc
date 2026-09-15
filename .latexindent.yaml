@@ -1,0 +1,9 @@
+defaultSettings:
+  indent: "    "
+  maximumIndentation: 40
+
+modifyLineBreaks:
+  textWrapOptions:
+    columns: 80
+    when: before
+
