@@ -3,4 +3,3 @@ CompileFlags:
   Add:
     - -std=gnu++23
     - -I/include
-    - -DNYSE_PILLAR_TAQ

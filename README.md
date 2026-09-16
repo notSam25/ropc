@@ -111,7 +111,7 @@ choice for one argument can eliminate the only viable gadget for another.
 
 ## Building
 
-Requirements: CMake >= 3.13, a C++23 compiler, ninja(optional).
+Requirements: CMake >= 3.13, a C++23 compiler(g++ default), ninja(optional).
 
 ```sh
 mkdir build && cd build/
