@@ -32,7 +32,7 @@ API rather than a one-off exploit script.
 ## Pipeline
 
 1. **Gadget discovery**: scan the target binary for candidate gadgets
-   (Boyer-Moore-style byte scanning over executable sections).
+   (ret byte scanning over executable sections).
 2. **Clobber classification**: tag each gadget with the registers/memory it
    modifies (e.g. "gadget # 69,420 modifies `rax`").
 3. **Semantic classification**: for the gadgets that satisfy a given clobber
