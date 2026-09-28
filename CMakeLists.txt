@@ -6,7 +6,7 @@ FetchContent_Declare(
     GIT_TAG v1.15.0)
 
 FetchContent_Declare(
-   peparse 
+   peparse
     GIT_REPOSITORY https://github.com/trailofbits/pe-parse.git
     GIT_TAG 9e4e3587969ea2410dadda1ccfa909aec1121d09)
 
@@ -49,6 +49,8 @@ target_include_directories(${PROJECT_NAME}
             "${CAPSTONE_INCLUDE_DIR}"
 )
 
+target_compile_definitions(${PROJECT_NAME} PUBLIC DumpGadgetsToFile)
+
 # Warnings used in every build configuration
 target_compile_options(${PROJECT_NAME}
   PUBLIC
@@ -62,13 +64,16 @@ target_compile_options(${PROJECT_NAME}
 # Debug-only compiler options
 target_compile_options(${PROJECT_NAME}
   PUBLIC
+        $<$<CONFIG:Debug,RelWithDebInfo>:
+            -g
+        >
         $<$<CONFIG:Debug>:
+            -O0
             -fsanitize=address,undefined
             -fno-omit-frame-pointer
-            -g
-            -O0
         >
 )
+
 
 # Debug-only linker options
 target_link_options(${PROJECT_NAME}

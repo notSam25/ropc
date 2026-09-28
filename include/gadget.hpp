@@ -5,14 +5,71 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <pe-parse/parse.h>
+#include <stdexcept>
 #include <vector>
 
 // Utilities for finding rop gadgets
 namespace ropc::gadget {
 enum class GadgetError { InvalidPath = 0, CantRead, CapstoneError };
-
 using Gadget = std::vector<cs_insn>;
+
+static void DumpGadgets(const std::vector<ropc::gadget::Gadget> &gadgets) {
+  spdlog::trace(std::format("Writing 0x{:x} gadgets to disk", gadgets.size()));
+
+  const auto annonimizeGadget = [](const cs_insn &insn) -> std::string {
+    if (nullptr == insn.detail) {
+      throw std::runtime_error("expected `detail` field in instruction");
+    }
+
+    const cs_x86 &x86 = insn.detail->x86;
+
+    std::string result = std::format(" {} ", insn.mnemonic);
+
+    for (size_t idx = 0; idx < x86.op_count; idx++) {
+      const cs_x86_op &op = x86.operands[idx];
+      switch (op.type) {
+      case x86_op_type::X86_OP_IMM: {
+        result += "IMM;";
+        break;
+      }
+      case x86_op_type::X86_OP_REG: {
+        result += std::string(insn.op_str) + ";";
+        break;
+      }
+      case x86_op_type::X86_OP_MEM: {
+        result += std::string(insn.op_str) + ";";
+        break;
+      }
+      case x86_op_type::X86_OP_INVALID: {
+        result += std::string(insn.op_str) + ";";
+        break;
+      }
+      default: {
+        throw std::runtime_error("unimplemented operand type");
+      };
+      }
+    }
+
+    return result;
+  };
+
+  auto os = std::ofstream("gadets.txt");
+  for (const auto &gadget : gadgets) {
+    // location: gadget
+    std::string line = std::format("0x{:X} :", gadget.at(0).address);
+
+    for (const auto &insn : gadget) {
+      line += annonimizeGadget(insn);
+    }
+
+    os << line << std::endl;
+  }
+
+  os.close();
+}
+
 static std::expected<std::vector<Gadget>, GadgetError>
 FindGadgets(const std::filesystem::path &Path,
             size_t MaxInstructionDepth = 5) noexcept {
@@ -50,12 +107,15 @@ FindGadgets(const std::filesystem::path &Path,
          const peparse::bounded_buffer *BoundedBuffer) -> int {
         (void)SectionName;
 
-        // Only look for executable sections. TODO: consider just .TEXT section
-        // for simplicity
+        // TODO: remove hardcoded .text section filter
         if (0 == (ImageSectionHeader.Characteristics &
-                  peparse::IMAGE_SCN_CNT_CODE)) {
+                  peparse::IMAGE_SCN_CNT_CODE) ||
+            SectionName.find(".text") == std::string::npos) {
           return 0lu;
         }
+
+        spdlog::debug(std::format("Found executable section '{}' size 0x{:x}",
+                                  SectionName, BoundedBuffer->bufLen));
 
         auto *potentialRets = static_cast<std::vector<PotentialRet> *>(cbd);
 
@@ -87,6 +147,10 @@ FindGadgets(const std::filesystem::path &Path,
 
   std::vector<Gadget> gadgets;
 
+  // Capstone dissassembles allocates memory dynamically, so we have to clean up
+  // after it
+  std::vector<std::pair<cs_insn *, size_t>> cGadgetArrays;
+
   for (const auto &pRet : potentialRets) {
     // Capstone disassemble backwards until maximum of MaxInstructionDepth len
     // is found. A subset of instructions is derived from the super set of
@@ -102,7 +166,7 @@ FindGadgets(const std::filesystem::path &Path,
     // idx is the amount of bytes subtracted from pRet position; AKA the start
     // of the sliding window. TODO: change 0x69; is arbitrary funny number
     for (size_t idx = 0; idx < 0x69 && idx <= pRet._offset; idx++) {
-      cs_insn *insn;
+      cs_insn *insn = nullptr;
       size_t numInsn =
           cs_disasm(capstone, pRet._boundedBuffer->buf + pRet._offset - idx,
                     idx + 1, pRet._sectionBase + pRet._offset - idx, 0, &insn);
@@ -128,7 +192,7 @@ FindGadgets(const std::filesystem::path &Path,
             break;
           }
 
-          // TODO: chcek for more categories such as calls
+          // TODO: check for more categories such as calls
 
           // There's some optimization that can be done here to reduce the
           // surface area of gadgets to be searched. but that may be putting the
@@ -147,15 +211,23 @@ FindGadgets(const std::filesystem::path &Path,
         } else {
           gadgets.push_back(std::move(gadget));
         }
-
-        cs_free(insn, numInsn);
+        cGadgetArrays.emplace_back(std::pair<cs_insn *, size_t>{insn, numInsn});
       } else {
-        cs_free(insn, numInsn);
+        cGadgetArrays.emplace_back(std::pair<cs_insn *, size_t>{insn, numInsn});
       }
     }
   }
 
-  // gadgets is now populated with all the gadgets we've filterd down
+  // `gadgets` is now populated with all the gadgets we've filterd down
+
+#ifdef DumpGadgetsToFile
+  DumpGadgets(gadgets);
+#endif
+
+  // clean up capstone and pe-parser
+  for (auto [insn, count] : cGadgetArrays) {
+    cs_free(insn, count);
+  }
 
   if (auto err = cs_close(&capstone); err != CS_ERR_OK) {
     spdlog::warn(std::format("Failed to close capstone with err: 0x{:x}",
@@ -163,6 +235,8 @@ FindGadgets(const std::filesystem::path &Path,
   }
 
   peparse::DestructParsedPE(pe);
+
+  spdlog::trace(std::format("Found {} gadgets", gadgets.size()));
   return gadgets;
 }
 } // namespace ropc::gadget
