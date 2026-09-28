@@ -2,6 +2,7 @@
 #include "pe-parse/nt-headers.h"
 #include "spdlog/spdlog.h"
 #include <capstone/capstone.h>
+#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -84,6 +85,7 @@ FindGadgets(const std::filesystem::path &Path,
   // Enable detailed decompilation of gadgets(uses more memory and processing
   // power)
   cs_option(capstone, CS_OPT_DETAIL, CS_OPT_ON);
+  cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_OFF);
 
   std::vector<Gadget> gadgets;
 
@@ -97,11 +99,17 @@ FindGadgets(const std::filesystem::path &Path,
     // position to get the MaxInstructionDepth faster than iteravely. Currently
     // not performant by any measure.
 
-    Gadget gadget;
+    // The byte immediately after our candidate 0xC3; a validly-aligned
+    // decode run must end exactly here, otherwise the "ret" we found at
+    // insn[numInsn - 1] is a decode landing on unrelated/misaligned bytes
+    // rather than our actual candidate.
+    const uint64_t targetEnd = pRet._sectionBase + pRet._offset + 1;
 
     // idx is the amount of bytes subtracted from pRet position; AKA the start
     // of the sliding window. TODO: change 0x69; is arbitrary funny number
     for (size_t idx = 0; idx < 0x69 && idx <= pRet._offset; idx++) {
+      Gadget gadget;
+
       cs_insn *insn;
       size_t numInsn =
           cs_disasm(capstone, pRet._boundedBuffer->buf + pRet._offset - idx,
@@ -111,24 +119,71 @@ FindGadgets(const std::filesystem::path &Path,
         // If we want to keep this gadget or not
         bool badGadget = false;
 
-        // Filter for last gadget being a RET
-        if (insn[numInsn - 1].id != X86_INS_RET) {
+        const cs_insn &last = insn[numInsn - 1];
+        if (last.id != X86_INS_RET || (last.address + last.size) != targetEnd) {
           badGadget = true;
         }
 
         // Further filter down out gadgets
-        for (size_t jdx = 0; false == badGadget && jdx < numInsn; jdx++) {
-          cs_insn *curInsn = insn + jdx;
-          if (cs_insn_group(capstone, curInsn, CS_GRP_JUMP) &&
-              (curInsn->id == X86_INS_JMP || curInsn->id == X86_INS_LJMP)) {
-            // Unconditional jumps are something to be explicitly filtered
-            // out(for now)
+        for (size_t jdx = 0; false == badGadget && jdx < numInsn - 1; jdx++) {
+          cs_insn *curInsn = insn + jdx, *nextInsn = insn + jdx + 1;
+
+          if (curInsn->address + curInsn->size != nextInsn->address) {
+            // A decoding failure
 
             badGadget = true;
             break;
           }
 
-          // TODO: chcek for more categories such as calls
+          if (cs_insn_group(capstone, insn, CS_GRP_JUMP)) {
+            const cs_x86_op *op = &insn->detail->x86.operands[0];
+
+            if (op->type == X86_OP_IMM) {
+              switch (insn->id) {
+              case X86_INS_JAE:
+              case X86_INS_JA:
+              case X86_INS_JBE:
+              case X86_INS_JB:
+              case X86_INS_JCXZ:
+              case X86_INS_JECXZ:
+              case X86_INS_JE:
+              case X86_INS_JGE:
+              case X86_INS_JG:
+              case X86_INS_JLE:
+              case X86_INS_JL:
+              case X86_INS_JNE:
+              case X86_INS_JNO:
+              case X86_INS_JNP:
+              case X86_INS_JNS:
+              case X86_INS_JO:
+              case X86_INS_JP:
+              case X86_INS_JRCXZ:
+              case X86_INS_JS:
+                break;
+              default:
+                // filter out jmp literal insns
+                badGadget = true;
+                break;
+              }
+
+              if (badGadget) {
+                break;
+              }
+            }
+          }
+
+          if (cs_insn_group(capstone, insn, CS_GRP_CALL) &&
+              insn->detail->x86.operands[0].type == X86_OP_IMM) {
+            // call IMM aren't great gadgets
+            badGadget = true;
+            break;
+          }
+
+          if (cs_insn_group(capstone, insn, CS_GRP_RET) ||
+              cs_insn_group(capstone, insn, CS_GRP_IRET)) {
+            badGadget = true;
+            break;
+          }
 
           // There's some optimization that can be done here to reduce the
           // surface area of gadgets to be searched. but that may be putting the
@@ -142,9 +197,7 @@ FindGadgets(const std::filesystem::path &Path,
           gadget.emplace_back(std::move(copy));
         }
 
-        if (badGadget) {
-          gadget.clear();
-        } else {
+        if (false == badGadget) {
           gadgets.push_back(std::move(gadget));
         }
 
