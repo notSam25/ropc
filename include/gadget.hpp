@@ -16,61 +16,6 @@ namespace ropc::gadget {
 enum class GadgetError { InvalidPath = 0, CantRead, CapstoneError };
 using Gadget = std::vector<cs_insn>;
 
-static void DumpGadgets(const std::vector<ropc::gadget::Gadget> &gadgets) {
-  spdlog::trace(std::format("Writing 0x{:x} gadgets to disk", gadgets.size()));
-
-  const auto annonimizeGadget = [](const cs_insn &insn) -> std::string {
-    if (nullptr == insn.detail) {
-      throw std::runtime_error("expected `detail` field in instruction");
-    }
-
-    const cs_x86 &x86 = insn.detail->x86;
-
-    std::string result = std::format(" {} ", insn.mnemonic);
-
-    for (size_t idx = 0; idx < x86.op_count; idx++) {
-      const cs_x86_op &op = x86.operands[idx];
-      switch (op.type) {
-      case x86_op_type::X86_OP_IMM: {
-        result += "IMM;";
-        break;
-      }
-      case x86_op_type::X86_OP_REG: {
-        result += std::string(insn.op_str) + ";";
-        break;
-      }
-      case x86_op_type::X86_OP_MEM: {
-        result += std::string(insn.op_str) + ";";
-        break;
-      }
-      case x86_op_type::X86_OP_INVALID: {
-        result += std::string(insn.op_str) + ";";
-        break;
-      }
-      default: {
-        throw std::runtime_error("unimplemented operand type");
-      };
-      }
-    }
-
-    return result;
-  };
-
-  auto os = std::ofstream("gadets.txt");
-  for (const auto &gadget : gadgets) {
-    // location: gadget
-    std::string line = std::format("0x{:X} :", gadget.at(0).address);
-
-    for (const auto &insn : gadget) {
-      line += annonimizeGadget(insn);
-    }
-
-    os << line << std::endl;
-  }
-
-  os.close();
-}
-
 static std::expected<std::vector<Gadget>, GadgetError>
 FindGadgets(const std::filesystem::path &Path,
             size_t MaxInstructionDepth = 5) noexcept {
@@ -148,10 +93,9 @@ FindGadgets(const std::filesystem::path &Path,
   cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_OFF);
 
   std::vector<Gadget> gadgets;
-
-  // Capstone dissassembles allocates memory dynamically, so we have to clean up
-  // after it
-  std::vector<std::pair<cs_insn *, size_t>> cGadgetArrays;
+#ifdef DumpGadgetsToFile
+  auto os = std::ofstream("gadets.txt");
+#endif
 
   for (const auto &pRet : potentialRets) {
     // Capstone disassemble backwards until maximum of MaxInstructionDepth len
@@ -255,33 +199,79 @@ FindGadgets(const std::filesystem::path &Path,
           // said not to optimize to early!
 
           auto copy = *curInsn;
-          // TODO: if detail is required later on, copy this structure,
-          // otherwise we don't need a dangling pointer
-          copy.detail = NULL;
           gadget.emplace_back(std::move(copy));
         }
 
         if (false == badGadget) {
+#ifdef DumpGadgetsToFile
+          // serialize gadget
+          const auto annonimizeGadget = [](const cs_insn &insn) -> std::string {
+            // TODO: simplify this with simple regex on mnemonic and operand
+            // strings
+
+            if (nullptr == insn.detail) {
+              throw std::runtime_error(
+                  "expected `detail` field in instruction");
+            }
+
+            const cs_x86 &x86 = insn.detail->x86;
+
+            std::string result = std::format(" {} ", insn.mnemonic);
+
+            for (size_t idx = 0; idx < x86.op_count; idx++) {
+              const cs_x86_op &op = x86.operands[idx];
+              switch (op.type) {
+              case x86_op_type::X86_OP_IMM: {
+                result += "IMM;";
+                break;
+              }
+              case x86_op_type::X86_OP_REG: {
+                result += std::string(insn.op_str) + ";";
+                break;
+              }
+              case x86_op_type::X86_OP_MEM: {
+                result += std::string(insn.op_str) + ";";
+                break;
+              }
+              case x86_op_type::X86_OP_INVALID: {
+                result += std::string(insn.op_str) + ";";
+                break;
+              }
+              default: {
+                throw std::runtime_error("unimplemented operand type");
+              };
+              }
+            }
+
+            return result;
+          };
+
+          std::string line = std::format("0x{:X} :", gadget.at(0).address);
+
+#endif
+          for (auto &insn : gadget) {
+#ifdef DumpGadgetsToFile
+            line += annonimizeGadget(insn);
+#endif
+            // null out details since we free this memory
+            insn.detail = nullptr;
+          }
+#ifdef DumpGadgetsToFile
+          os << line << std::endl;
+#endif
+          // add gaget to list
           gadgets.push_back(std::move(gadget));
         }
-        cGadgetArrays.emplace_back(std::pair<cs_insn *, size_t>{insn, numInsn});
-      } else {
-        cGadgetArrays.emplace_back(std::pair<cs_insn *, size_t>{insn, numInsn});
       }
+
+      // thou shall not leak memory
+      cs_free(insn, numInsn);
     }
   }
 
-  // `gadgets` is now populated with all the gadgets we've filterd down
-
-#ifdef DumpGadgetsToFile
-  DumpGadgets(gadgets);
-#endif
+  os.close();
 
   // clean up capstone and pe-parser
-  for (auto [insn, count] : cGadgetArrays) {
-    cs_free(insn, count);
-  }
-
   if (auto err = cs_close(&capstone); err != CS_ERR_OK) {
     spdlog::warn(std::format("Failed to close capstone with err: 0x{:x}",
                              static_cast<uint8_t>(err)));
